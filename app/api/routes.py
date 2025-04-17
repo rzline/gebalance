@@ -4,13 +4,9 @@ from app.models import ChatCompletionRequest, ChatCompletionResponse, ErrorRespo
 from app.services import GeminiClient
 from app.utils import protect_from_abuse,generate_cache_key
 from .stream_handlers import process_stream_request
-# from app.config.settings import CONCURRENT_REQUESTS, INCREASE_CONCURRENT_ON_FAILURE, MAX_CONCURRENT_REQUESTS
 from app.models.schemas import ChatCompletionResponse, Choice, Message 
 
-from app.config.settings import (
-    api_call_stats,
-    BLOCKED_MODELS
-)
+import app.config.settings as settings
 import asyncio
 import time
 from app.utils.logging import log
@@ -68,13 +64,13 @@ def init_router(
 
 # 自定义密码验证依赖
 async def custom_verify_password(request: Request):
-    await verify_password(request, PASSWORD)
+    await verify_password(request, settings.PASSWORD)
 
 # API路由
 @router.get("/v1/models", response_model=ModelList)
 def list_models():
     log('info', "Received request to list models", extra={'request_type': 'list_models', 'status_code': 200})
-    filtered_models = [model for model in GeminiClient.AVAILABLE_MODELS if model not in BLOCKED_MODELS]
+    filtered_models = [model for model in GeminiClient.AVAILABLE_MODELS if model not in settings.BLOCKED_MODELS]
     return ModelList(data=[{"id": model, "object": "model", "created": 1678888888, "owned_by": "organization-owner"} for model in filtered_models])
 
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -86,7 +82,9 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     client_ip = http_request.client.host if http_request.client else "unknown"
     # 请求前基本检查
     protect_from_abuse(
-        http_request, MAX_REQUESTS_PER_MINUTE, MAX_REQUESTS_PER_DAY_PER_IP)
+        http_request, 
+        settings.MAX_REQUESTS_PER_MINUTE, 
+        settings.MAX_REQUESTS_PER_DAY_PER_IP)
     if request.model not in GeminiClient.AVAILABLE_MODELS:
         log('error', "无效的模型", 
             extra={'model': request.model, 'status_code': 400})
@@ -101,9 +99,9 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             key_manager,
             safety_settings,
             safety_settings_g2,
-            api_call_stats,
-            FAKE_STREAMING,
-            FAKE_STREAMING_INTERVAL
+            settings.api_call_stats,
+            settings.FAKE_STREAMING,
+            settings.FAKE_STREAMING_INTERVAL
         )
     
     # 生成完整缓存键 - 用于精确匹配
@@ -228,7 +226,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             active_requests_manager,
             safety_settings,
             safety_settings_g2,
-            api_call_stats,
+            settings.api_call_stats,
             cache_key,
             client_ip
         )

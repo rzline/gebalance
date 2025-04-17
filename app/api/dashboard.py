@@ -7,29 +7,11 @@ from app.utils import (
     ActiveRequestsManager,
     clean_expired_stats
 )
-from app.config.settings import (
-    API_KEY_DAILY_LIMIT,
-    FAKE_STREAMING,
-    FAKE_STREAMING_INTERVAL,
-    RANDOM_STRING,
-    RANDOM_STRING_LENGTH,
-    MAX_REQUESTS_PER_MINUTE,
-    MAX_REQUESTS_PER_DAY_PER_IP,
-    CACHE_EXPIRY_TIME,
-    MAX_CACHE_ENTRIES,
-    REMOVE_CACHE_AFTER_USE,
-    ENABLE_RECONNECT_DETECTION,
-    version,
-    search,
-    CONCURRENT_REQUESTS,
-    INCREASE_CONCURRENT_ON_FAILURE,
-    MAX_CONCURRENT_REQUESTS
-)
 import app.config.settings as settings
 from app.services import GeminiClient
 from app.utils.auth import verify_password
 from app.utils.maintenance import api_call_stats_clean
-
+from app.utils.logging import log
 # 创建路由器
 dashboard_router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -104,13 +86,13 @@ async def get_dashboard_data():
                 model_stats[model] = model_calls
         
         # 计算使用百分比
-        usage_percent = (calls_24h / API_KEY_DAILY_LIMIT) * 100 if API_KEY_DAILY_LIMIT > 0 else 0
+        usage_percent = (calls_24h / settings.API_KEY_DAILY_LIMIT) * 100 if settings.API_KEY_DAILY_LIMIT > 0 else 0
         
         # 添加到结果列表
         api_key_stats.append({
             'api_key': api_key_id,
             'calls_24h': calls_24h,
-            'limit': API_KEY_DAILY_LIMIT,
+            'limit': settings.API_KEY_DAILY_LIMIT,
             'usage_percent': round(usage_percent, 2),
             'model_stats': model_stats  # 添加按模型分类的统计数据
         })
@@ -158,39 +140,41 @@ async def get_dashboard_data():
         "logs": recent_logs,
         "api_key_stats": api_key_stats,
         # 添加配置信息
-        "max_requests_per_minute": MAX_REQUESTS_PER_MINUTE,
-        "max_requests_per_day_per_ip": MAX_REQUESTS_PER_DAY_PER_IP,
+        "max_requests_per_minute": settings.MAX_REQUESTS_PER_MINUTE,
+        "max_requests_per_day_per_ip": settings.MAX_REQUESTS_PER_DAY_PER_IP,
         # 添加版本信息
-        "local_version": version["local_version"],
-        "remote_version": version["remote_version"],
-        "has_update": version["has_update"],
+        "local_version": settings.version["local_version"],
+        "remote_version": settings.version["remote_version"],
+        "has_update": settings.version["has_update"],
         # 添加流式响应配置
-        "fake_streaming": FAKE_STREAMING,
-        "fake_streaming_interval": FAKE_STREAMING_INTERVAL,
+        "fake_streaming": settings.FAKE_STREAMING,
+        "fake_streaming_interval": settings.FAKE_STREAMING_INTERVAL,
         # 添加随机字符串配置
-        "random_string": RANDOM_STRING,
-        "random_string_length": RANDOM_STRING_LENGTH,
+        "random_string": settings.RANDOM_STRING,
+        "random_string_length": settings.RANDOM_STRING_LENGTH,
         # 添加联网搜索配置
-        "search_mode": search["search_mode"],
-        "search_prompt": search["search_prompt"],
+        "search_mode": settings.search["search_mode"],
+        "search_prompt": settings.search["search_prompt"],
         # 添加缓存信息
         "cache_entries": total_cache,
         "valid_cache": valid_cache,
         "expired_cache": total_cache - valid_cache,
-        "cache_expiry_time": CACHE_EXPIRY_TIME,
-        "max_cache_entries": MAX_CACHE_ENTRIES,
+        "cache_expiry_time": settings.CACHE_EXPIRY_TIME,
+        "max_cache_entries": settings.MAX_CACHE_ENTRIES,
         "cache_by_model": cache_by_model,
         "request_history_count": history_count,
-        "enable_reconnect_detection": ENABLE_RECONNECT_DETECTION,
-        "remove_cache_after_use": REMOVE_CACHE_AFTER_USE,
+        "enable_reconnect_detection": settings.ENABLE_RECONNECT_DETECTION,
+        "remove_cache_after_use": settings.REMOVE_CACHE_AFTER_USE,
         # 添加活跃请求池信息
         "active_count": active_count,
         "active_done": active_done,
         "active_pending": active_pending,
         # 添加并发请求配置
-        "concurrent_requests": CONCURRENT_REQUESTS,
-        "increase_concurrent_on_failure": INCREASE_CONCURRENT_ON_FAILURE,
-        "max_concurrent_requests": MAX_CONCURRENT_REQUESTS
+        "concurrent_requests": settings.CONCURRENT_REQUESTS,
+        "increase_concurrent_on_failure": settings.INCREASE_CONCURRENT_ON_FAILURE,
+        "max_concurrent_requests": settings.MAX_CONCURRENT_REQUESTS,
+        #启用vertex
+        "enable_vertex": settings.ENABLE_VERTEX,
     }
 
 @dashboard_router.post("/reset-stats")
@@ -226,3 +210,130 @@ async def reset_stats(password_data: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置失败：{str(e)}")
+
+@dashboard_router.post("/update-config")
+async def update_config(config_data: dict):
+    """
+    更新配置项
+    
+    Args:
+        config_data (dict): 包含配置项和密码的字典
+        
+    Returns:
+        dict: 操作结果
+    """
+    try:
+        if not isinstance(config_data, dict):
+            raise HTTPException(status_code=422, detail="请求体格式错误：应为JSON对象")
+            
+        password = config_data.get("password")
+        if not password:
+            raise HTTPException(status_code=400, detail="缺少密码参数")
+            
+        if not isinstance(password, str):
+            raise HTTPException(status_code=422, detail="密码参数类型错误：应为字符串")
+            
+        if not verify_password(password):
+            raise HTTPException(status_code=401, detail="密码错误")
+        
+        # 获取要更新的配置项
+        config_key = config_data.get("key")
+        config_value = config_data.get("value")
+        
+        if not config_key:
+            raise HTTPException(status_code=400, detail="缺少配置项键名")
+            
+        # 根据配置项类型进行类型转换和验证
+        if config_key == "max_requests_per_minute":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("每分钟请求限制必须大于0")
+                settings.MAX_REQUESTS_PER_MINUTE = value
+                log('info', f"每分钟请求限制已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "max_requests_per_day_per_ip":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("每IP每日请求限制必须大于0")
+                settings.MAX_REQUESTS_PER_DAY_PER_IP = value
+                log('info', f"每IP每日请求限制已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "fake_streaming":
+            if not isinstance(config_value, bool):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为布尔值")
+            settings.FAKE_STREAMING = config_value
+            log('info', f"假流式请求已更新为：{config_value}")
+        elif config_key == "fake_streaming_interval":
+            try:
+                value = float(config_value)
+                if value <= 0:
+                    raise ValueError("假流式间隔必须大于0")
+                settings.FAKE_STREAMING_INTERVAL = value
+                log('info', f"假流式间隔已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "random_string":
+            if not isinstance(config_value, bool):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为布尔值")
+            settings.RANDOM_STRING = config_value
+            log('info', f"随机字符串已更新为：{config_value}")
+        elif config_key == "random_string_length":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("随机字符串长度必须大于0")
+                settings.RANDOM_STRING_LENGTH = value
+                log('info', f"随机字符串长度已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "search_mode":
+            if not isinstance(config_value, bool):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为布尔值")
+            settings.search["search_mode"] = config_value
+            log('info', f"联网搜索模式已更新为：{config_value}")      
+        elif config_key == "concurrent_requests":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("并发请求数必须大于0")
+                settings.CONCURRENT_REQUESTS = value
+                log('info', f"并发请求数已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "increase_concurrent_on_failure":
+            try:
+                value = int(config_value)
+                if value < 0:
+                    raise ValueError("失败时增加的并发数不能为负数")
+                settings.INCREASE_CONCURRENT_ON_FAILURE = value
+                log('info', f"失败时增加的并发数已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        elif config_key == "max_concurrent_requests":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("最大并发请求数必须大于0")
+                settings.MAX_CONCURRENT_REQUESTS = value
+                log('info', f"最大并发请求数已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+                
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的配置项：{config_key}")
+        
+        return {"status": "success", "message": f"配置项 {config_key} 已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新失败：{str(e)}")

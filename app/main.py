@@ -19,26 +19,9 @@ from app.utils import (
     log
 )
 from app.api import router, init_router, dashboard_router, init_dashboard_router
-from app.config.settings import (
-    FAKE_STREAMING,
-    FAKE_STREAMING_INTERVAL,
-    RANDOM_STRING,
-    RANDOM_STRING_LENGTH,
-    PASSWORD,
-    MAX_REQUESTS_PER_MINUTE,
-    MAX_REQUESTS_PER_DAY_PER_IP,
-    RETRY_DELAY,
-    MAX_RETRY_DELAY,
-    CACHE_EXPIRY_TIME,
-    MAX_CACHE_ENTRIES,
-    REMOVE_CACHE_AFTER_USE,
-    REQUEST_HISTORY_EXPIRY_TIME,
-    ENABLE_RECONNECT_DETECTION,
-    api_call_stats,
-    client_request_history,
-    version,
-    API_KEY_DAILY_LIMIT
-)
+from app.vertex.vertex import router as vertex_router
+from app.vertex.vertex import init_vertex_ai
+import app.config.settings as settings
 from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import os
 import json
@@ -50,7 +33,6 @@ import sys
 import pathlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
-
 # 设置模板目录
 BASE_DIR = pathlib.Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -68,9 +50,9 @@ response_cache = {}
 
 # 初始化缓存管理器，使用全局字典作为存储
 response_cache_manager = ResponseCacheManager(
-    expiry_time=CACHE_EXPIRY_TIME,
-    max_entries=MAX_CACHE_ENTRIES,
-    remove_after_use=REMOVE_CACHE_AFTER_USE,
+    expiry_time=settings.CACHE_EXPIRY_TIME,
+    max_entries=settings.MAX_CACHE_ENTRIES,
+    remove_after_use=settings.REMOVE_CACHE_AFTER_USE,
     cache_dict=response_cache
 )
 
@@ -148,85 +130,89 @@ sys.excepthook = handle_exception
 @app.on_event("startup")
 async def startup_event():
     log('info', "Starting Gemini API proxy...")
-    
-    # 启动缓存清理定时任务
-    schedule_cache_cleanup(response_cache_manager, active_requests_manager)
-    
-    # 检查版本
-    await check_version()
-    
-    # 先同步检查一个密钥，用于加载可用模型
-    all_keys = key_manager.api_keys.copy()
-    key_manager.api_keys = []  # 清空当前密钥列表
-    
-    # 尝试找到一个有效的密钥
-    valid_key_found = False
-    for key in all_keys:
-        is_valid = await test_api_key(key)
-        if is_valid:
-            key_manager.api_keys.append(key)
-            key_manager._reset_key_stack()
-            log('info', f"初始检查: API Key {key[:8]}... 有效，已添加到可用列表")
-            valid_key_found = True
-            
-            # 使用这个有效密钥加载可用模型
-            try:
-                all_models = await GeminiClient.list_available_models(key)
-                GeminiClient.AVAILABLE_MODELS = [model.replace(
-                    "models/", "") for model in all_models]
-                log('info', "Available models loaded.")
-            except Exception as e:
-                log('warning', f"无法加载可用模型: {str(e)}")
-            
-            break  # 找到一个有效密钥后就跳出循环
-    
-    if not valid_key_found:
-        log('warning', "初始检查未找到有效密钥，将在后台继续检查")
-    
-    # 在后台线程中检查剩余的密钥
-    remaining_keys = [k for k in all_keys if k not in key_manager.api_keys]
-    if remaining_keys:
-        def check_remaining_keys():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                # 创建线程池检查剩余密钥
-                with ThreadPoolExecutor(max_workers=min(10, len(remaining_keys))) as executor:
-                    future_to_key = {executor.submit(check_key_in_thread, key): key for key in remaining_keys}
-                    for future in future_to_key:
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            log('error', f"检查密钥时发生错误: {exc}")
-            finally:
-                loop.close()
-                log('info', f"后台密钥检查完成，当前可用密钥数量: {len(key_manager.api_keys)}")
+    if settings.ENABLE_VERTEX:
+        await check_version()
+        init_vertex_ai()
+        log('info', "初始化Vertex AI")
+    else:
+        # 启动缓存清理定时任务
+        schedule_cache_cleanup(response_cache_manager, active_requests_manager)
         
-        # 启动后台线程检查剩余密钥
-        threading.Thread(target=check_remaining_keys, daemon=True).start()
-        log('info', f"后台线程已启动，正在检查剩余的 {len(remaining_keys)} 个API密钥...")
-    
-    # 显示当前可用密钥
-    key_manager.show_all_keys()
-    log('info', f"当前可用 API 密钥数量：{len(key_manager.api_keys)}")
-    log('info', f"最大重试次数设置为：{len(key_manager.api_keys)}")
-    
-    # 初始化路由器
-    init_router(
-        key_manager,
-        response_cache_manager,
-        active_requests_manager,
-        SAFETY_SETTINGS,
-        SAFETY_SETTINGS_G2,
-        current_api_key,
-        FAKE_STREAMING,
-        FAKE_STREAMING_INTERVAL,
-        PASSWORD,
-        MAX_REQUESTS_PER_MINUTE,
-        MAX_REQUESTS_PER_DAY_PER_IP
-    )
-    
-    # 初始化仪表盘路由器
+        # 检查版本
+        await check_version()
+        
+        # 先同步检查一个密钥，用于加载可用模型
+        all_keys = key_manager.api_keys.copy()
+        key_manager.api_keys = []  # 清空当前密钥列表
+        
+        # 尝试找到一个有效的密钥
+        valid_key_found = False
+        for key in all_keys:
+            is_valid = await test_api_key(key)
+            if is_valid:
+                key_manager.api_keys.append(key)
+                key_manager._reset_key_stack()
+                log('info', f"初始检查: API Key {key[:8]}... 有效，已添加到可用列表")
+                valid_key_found = True
+                
+                # 使用这个有效密钥加载可用模型
+                try:
+                    all_models = await GeminiClient.list_available_models(key)
+                    GeminiClient.AVAILABLE_MODELS = [model.replace(
+                        "models/", "") for model in all_models]
+                    log('info', "Available models loaded.")
+                except Exception as e:
+                    log('warning', f"无法加载可用模型: {str(e)}")
+                
+                break  # 找到一个有效密钥后就跳出循环
+        
+        if not valid_key_found:
+            log('warning', "初始检查未找到有效密钥，将在后台继续检查")
+        
+        # 在后台线程中检查剩余的密钥
+        remaining_keys = [k for k in all_keys if k not in key_manager.api_keys]
+        if remaining_keys:
+            def check_remaining_keys():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # 创建线程池检查剩余密钥
+                    with ThreadPoolExecutor(max_workers=min(10, len(remaining_keys))) as executor:
+                        future_to_key = {executor.submit(check_key_in_thread, key): key for key in remaining_keys}
+                        for future in future_to_key:
+                            try:
+                                future.result()
+                            except Exception as exc:
+                                log('error', f"检查密钥时发生错误: {exc}")
+                finally:
+                    loop.close()
+                    log('info', f"后台密钥检查完成，当前可用密钥数量: {len(key_manager.api_keys)}")
+            
+            # 启动后台线程检查剩余密钥
+            threading.Thread(target=check_remaining_keys, daemon=True).start()
+            log('info', f"后台线程已启动，正在检查剩余的 {len(remaining_keys)} 个API密钥...")
+        
+        # 显示当前可用密钥
+        key_manager.show_all_keys()
+        log('info', f"当前可用 API 密钥数量：{len(key_manager.api_keys)}")
+        log('info', f"最大重试次数设置为：{len(key_manager.api_keys)}")
+        
+        # 初始化路由器
+        init_router(
+            key_manager,
+            response_cache_manager,
+            active_requests_manager,
+            SAFETY_SETTINGS,
+            SAFETY_SETTINGS_G2,
+            current_api_key,
+            settings.FAKE_STREAMING,
+            settings.FAKE_STREAMING_INTERVAL,
+            settings.PASSWORD,
+            settings.MAX_REQUESTS_PER_MINUTE,
+            settings.MAX_REQUESTS_PER_DAY_PER_IP
+        )
+        
+        # 初始化仪表盘路由器
     init_dashboard_router(
         key_manager,
         response_cache_manager,
@@ -241,18 +227,11 @@ async def startup_event():
         SAFETY_SETTINGS,
         SAFETY_SETTINGS_G2,
         current_api_key,
-        FAKE_STREAMING,
-        FAKE_STREAMING_INTERVAL,
-        PASSWORD,
-        MAX_REQUESTS_PER_MINUTE,
-        MAX_REQUESTS_PER_DAY_PER_IP
-    )
-    
-    # 初始化仪表盘路由器
-    init_dashboard_router(
-        key_manager,
-        response_cache_manager,
-        active_requests_manager
+        settings.FAKE_STREAMING,
+        settings.FAKE_STREAMING_INTERVAL,
+        settings.PASSWORD,
+        settings.MAX_REQUESTS_PER_MINUTE,
+        settings.MAX_REQUESTS_PER_DAY_PER_IP
     )
 
 # --------------- 异常处理 ---------------
@@ -263,12 +242,15 @@ async def global_exception_handler(request: Request, exc: Exception):
     error_message = translate_error(str(exc))
     extra_log_unhandled_exception = {'status_code': 500, 'error_message': error_message}
     log('error', f"Unhandled exception: {error_message}", extra=extra_log_unhandled_exception)
-    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=ErrorResponse(message=str(exc), type="internal_error").dict())
+    return JSONResponse(status_code=500, content=ErrorResponse(message=str(exc), type="internal_error").dict())
 
 # --------------- 路由 ---------------
 
 # 包含API路由
-app.include_router(router)
+if settings.ENABLE_VERTEX:
+    app.include_router(vertex_router)
+else:
+    app.include_router(router)
 app.include_router(dashboard_router)
 
 # 挂载静态文件目录

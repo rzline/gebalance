@@ -14,8 +14,8 @@ FAKE_STREAMING_INTERVAL = float(os.environ.get("FAKE_STREAMING_INTERVAL", "1"))
 #随机字符串
 RANDOM_STRING = os.environ.get("RANDOM_STRING", "true").lower() in ["true", "1", "yes"]
 RANDOM_STRING_LENGTH = int(os.environ.get("RANDOM_STRING_LENGTH", "5"))
-
-
+# 是否启用Vertex AI
+ENABLE_VERTEX = os.environ.get("ENABLE_VERTEX", "false").lower() in ["true", "1", "yes"]
 # 日志配置
 logging.getLogger("uvicorn").disabled = True
 logging.getLogger("uvicorn.access").disabled = True
@@ -29,8 +29,8 @@ MAX_RETRY_DELAY = 16
 
 # 并发请求配置
 CONCURRENT_REQUESTS = int(os.environ.get("CONCURRENT_REQUESTS", "1"))  # 默认并发请求数
-INCREASE_CONCURRENT_ON_FAILURE = int(os.environ.get("INCREASE_CONCURRENT_ON_FAILURE", "1"))  # 失败时增加的并发数
-MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "3"))  # 最大并发请求数
+INCREASE_CONCURRENT_ON_FAILURE = int(os.environ.get("INCREASE_CONCURRENT_ON_FAILURE", "0"))  # 失败时增加的并发数
+MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "2"))  # 最大并发请求数
 
 # API密钥使用限制
 # 默认每个API密钥每24小时可使用次数

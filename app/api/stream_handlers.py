@@ -8,7 +8,6 @@ from app.models import ChatCompletionRequest
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, update_api_call_stats
 from app.utils.logging import log
-from app.config.settings import CONCURRENT_REQUESTS, INCREASE_CONCURRENT_ON_FAILURE, MAX_CONCURRENT_REQUESTS
 import app.config.settings as settings
 # 流式请求处理函数
 async def process_stream_request(
@@ -36,14 +35,14 @@ async def process_stream_request(
         random.shuffle(all_keys)  # 随机打乱密钥顺序
         
         # 设置初始并发数
-        current_concurrent = CONCURRENT_REQUESTS
+        current_concurrent = settings.CONCURRENT_REQUESTS
         
         # 如果可用密钥数量小于并发数，则使用所有可用密钥
         if len(all_keys) < current_concurrent:
             current_concurrent = len(all_keys)
         
         # 创建一个队列（用于假流式模式的响应内容）
-        response_queue = asyncio.Queue() if FAKE_STREAMING else None
+        response_queue = asyncio.Queue() if settings.FAKE_STREAMING else None
         
         # 将保活消息格式化为SSE格式
         formatted_chunk = {
@@ -56,14 +55,14 @@ async def process_stream_request(
         keep_alive_message=f"data: {json.dumps(formatted_chunk)}\n\n"
         
         # 如果是假流式模式，先发送一次保活消息,以免处理时断联
-        if FAKE_STREAMING :
+        if settings.FAKE_STREAMING :
             try:
                 yield keep_alive_message
             except StopAsyncIteration:
                 pass
         
         # (假流式) 尝试使用不同API密钥，直到所有密钥都尝试过
-        while (all_keys and FAKE_STREAMING):
+        while (all_keys and settings.FAKE_STREAMING):
             # 获取当前批次的密钥
             current_batch = all_keys[:current_concurrent]
             all_keys = all_keys[current_concurrent:]
@@ -97,12 +96,12 @@ async def process_stream_request(
                 # 短时间等待任务完成
                 done, pending = await asyncio.wait(
                     [task for _, task in tasks],
-                    timeout=FAKE_STREAMING_INTERVAL,
+                    timeout=settings.FAKE_STREAMING_INTERVAL,
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 
                 # 如果没有任务完成，发送保活消息
-                if not done and FAKE_STREAMING:
+                if not done and settings.FAKE_STREAMING: 
                     yield keep_alive_message
                     continue
                 
@@ -144,12 +143,12 @@ async def process_stream_request(
             # 如果所有请求都失败或返回空响应，增加并发数并继续尝试
             if not found_success and all_keys:
                 # 增加并发数，但不超过最大并发数
-                current_concurrent = min(current_concurrent + INCREASE_CONCURRENT_ON_FAILURE, MAX_CONCURRENT_REQUESTS)
+                current_concurrent = min(current_concurrent + settings.INCREASE_CONCURRENT_ON_FAILURE, settings.MAX_CONCURRENT_REQUESTS)
                 log('info', f"所有假流式请求失败或返回空响应，增加并发数至: {current_concurrent}", 
                     extra={'request_type': 'stream', 'model': chat_request.model})
 
         # (真流式) 尝试使用不同API密钥，直到所有密钥都尝试过
-        while (all_keys and not FAKE_STREAMING):
+        while (all_keys and not settings.FAKE_STREAMING):
             # 获取密钥
             api_key = all_keys[0]
             all_keys = all_keys[1:]                                  
